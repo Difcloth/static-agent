@@ -1,0 +1,67 @@
+import os
+import streamlit as st
+from langchain_community.chat_message_histories import UpstashRedisChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_openai import ChatOpenAI   # or use Groq, Anthropic, etc.
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, END
+from typing import Literal
+import math
+
+# === CONFIG ===
+UPSTASH_URL = os.getenv("UPSTASH_REDIS_URL")
+if not UPSTASH_URL:
+    st.error("Please set UPSTASH_REDIS_URL environment variable")
+    st.stop()
+
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)  # cheap & fast, or use Groq llama3-70b
+
+# === TOOLS ===
+def calculate_beam_deflection(L: float, w: float, E: float, I: float, load_type: Literal["uniform", "point"] = "uniform"):
+    if load_type == "uniform":
+        return 5 * w * L**4 / (384 * E * I)
+    else:
+        return w * L**3 / (48 * E * I)  # central point load
+
+# === PROMPT ===
+prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are StaticsAgent — an expert that ONLY solves statics and structural design problems 
+(beams, trusses, frames, deflection, buckling, section properties, Mohr's circle, etc.).
+If the question is not about statics or strength of materials, politely refuse.
+
+You have perfect memory of every problem ever asked to you.
+Use tools when needed. Always reason step-by-step and box the final answer."""),
+    MessagesPlaceholder(variable_name="history"),
+    ("human", "{input}"),
+])
+
+chain = prompt | llm
+
+history = UpstashRedisChatMessageHistory(url=UPSTASH_URL, ttl=None, session_id="statics_session")
+runnable = RunnableWithMessageHistory(chain, lambda x: history)
+
+# === STREAMLIT UI ===
+st.set_page_config(page_title="StaticsAgent", page_icon="🧮")
+st.title("🧮 StaticsAgent — Your Lifelong Structural Solver")
+st.caption("Connected to your private Upstash Redis — remembers everything forever")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+if user_input := st.chat_input("Ask any statics / structural design problem..."):
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    with st.chat_message("assistant"):
+        response = runnable.invoke(
+            {"input": user_input},
+            config={"configurable": {"session_id": "statics_session"}}
+        )
+        st.markdown(response.content)
+    st.session_state.messages.append({"role": "assistant", "content": response.content})
